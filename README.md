@@ -14,6 +14,7 @@ Tested on: Gigabyte G5 KF5 (i7-13620H, RTX 4060), Fedora 44, KDE Plasma 6, kerne
 | [`scripts/tcc-install.sh`](scripts/tcc-install.sh) | Installs TUXEDO Control Center (TCC) on top of step 1. Adds the `tuxedo_io` module to the DKMS build, installs a placeholder package so TCC uses your patched drivers instead of TUXEDO's, and adds TUXEDO's Fedora repo restricted to the Control Center only. | Yes |
 | [`scripts/kbd-neon-install.sh`](scripts/kbd-neon-install.sh) | A small systemd service that sets the keyboard brightness at boot and, optionally, cycles the keyboard through the colour wheel ("neon"). The G5 has a single-zone RGB keyboard, so the whole keyboard changes colour together. | Yes |
 | [`scripts/battery-draw.sh`](scripts/battery-draw.sh) | Measures real power draw on battery in two independent ways: current x voltage, and the drop in the battery's charge counter. Useful for checking power-saving changes, because `upower`'s rate can be inflated on some firmware. | No |
+| [`scripts/cpu-power-cap.sh`](scripts/cpu-power-cap.sh) | Caps the CPU package power (Intel RAPL) so the whole laptop stays under the 100 W a USB-C PD trigger cable can supply. Switch it on when you use the trigger cable, off when you are back on the 150 W charger. Resets on reboot. | Yes |
 
 Every script that changes the system runs as a **dry run by default** and only prints what it would do. Add `--apply` to make changes and `--remove` to undo them.
 
@@ -107,7 +108,51 @@ sudo systemctl restart kbd-neon
 
 If you install TCC, `tcc-install.sh` stops `kbd-neon` for you. Also turn off KDE's keyboard colour option, so KDE, TCC and `kbd-neon` do not overwrite each other.
 
-### Step 3: Measure (optional, any time)
+### Step 3: Charging from USB-C (optional)
+
+The G5 KF5 has no USB-C charging; it charges from a 19.5 V / 150 W barrel jack (5.5 x 2.5 mm). A USB-C PD "trigger" cable or adapter asks a USB-C charger for 20 V and feeds it into the barrel jack. USB-C at 20 V tops out at **100 W for the whole laptop**: CPU, screen, the rest of the system, and battery charging together.
+
+Without a cap, the i7-13620H bursts up to 115 W. Add charging on top and the total goes past 100 W, the charger's overload protection trips, and power drops in and out. `cpu-power-cap.sh` caps the CPU so the total stays under 100 W:
+
+```bash
+sudo ./scripts/cpu-power-cap.sh on          # 35 W sustained, 45 W burst (tested, see below)
+sudo ./scripts/cpu-power-cap.sh on 30 35    # tighter, for a low battery charging hard
+sudo ./scripts/cpu-power-cap.sh off         # back on the 150 W charger (a reboot also resets it)
+sudo ./scripts/cpu-power-cap.sh status
+```
+
+The script sets both of the CPU's power-limit interfaces, `intel-rapl:0` and `intel-rapl-mmio:0`. The CPU obeys whichever is lower, so setting only one can look like it has no effect.
+
+**What you need**
+
+- A USB-C charger that supplies **20 V at 5 A (100 W)**
+- A trigger cable or adapter with a **fixed 20 V** output and a **5.5 x 2.5 mm** plug
+- If the adapter has a USB-C socket, a USB-C cable **rated 5 A**. A 3 A cable limits you to 60 W.
+
+**Tested results** (G5 KF5, 100 W charger, USB-C to 5.5 x 2.5 mm adapter with a 5 A cable, `stress-ng` on all 16 threads for 3 minutes)
+
+| Setup | CPU power | Charger |
+| --- | --- | --- |
+| No cap, battery at 31% | Unlimited | Cut out 5 times |
+| Cap 35 W / 75 W | Up to about 50 W | Cut out twice, both at about 50 W |
+| **Cap 35 W / 45 W, battery at 72% and charging** | **45 W for about 34 s, then 35 W steady** | **No drops** |
+
+The burst limit applies for roughly the first 30 to 35 seconds (the firmware's averaging window), then the CPU settles at the sustained limit. Day-to-day coding stays well under either. Below about 40% battery, charging draws more; if power drops there, use `on 30 35` or do heavy work on the 150 W charger.
+
+**Testing a cable or charger**
+
+Run these in two terminals at the same time. The first shows live CPU power, the second creates the load:
+
+```bash
+sudo turbostat --quiet --show PkgWatt --interval 2      # terminal 1 (from kernel-tools)
+stress-ng --cpu 0 --timeout 180s                        # terminal 2
+```
+
+A power drop shows up in `turbostat` as `Could not migrate to CPU` lines: when power drops, TCC switches to its battery profile and takes CPU threads offline. Three minutes with none of those lines means the setup is stable.
+
+**Check the voltage.** Some trigger cables fall back to 5 V when they cannot get 20 V, instead of cutting power. The laptop treats 5 V as "no charger", so it looks like random power drops. A USB-C power meter between the charger and the cable shows this; it should read about 20 V. Stop using any cable that falls back to 5 V.
+
+### Step 4: Measure (optional, any time)
 
 Unplug the charger, keep your normal workload running, then:
 
